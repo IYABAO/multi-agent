@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // ReviewerAgent 审查 Worker 的结果
@@ -15,7 +16,7 @@ func (r *ReviewerAgent) Name() string { return "Reviewer" }
 
 func (r *ReviewerAgent) SystemPrompt() string {
 	return `你是质量审查专家。评估每个子任务的完成质量。
-对每个结果输出 JSON：
+对每个结果输出一行 JSON（不要输出数组，每行一个对象）：
 {"task_id":"1","score":8,"approved":true,"feedback":"简述意见"}
 score 范围 1-10，>=7 为通过。不要输出其他内容。`
 }
@@ -37,26 +38,32 @@ func (r *ReviewerAgent) Run(ctx context.Context, results []Result, tasks []Task)
 		return results, err
 	}
 
-	var reviews []struct {
+	// 逐行解析 NDJSON（每行一个 JSON 对象）
+	type review struct {
 		TaskID   string `json:"task_id"`
 		Score    int    `json:"score"`
 		Approved bool   `json:"approved"`
 		Feedback string `json:"feedback"`
 	}
-	if err := json.Unmarshal([]byte(resp), &reviews); err != nil {
-		return results, fmt.Errorf("reviewer parse error: %w, raw: %s", err, resp)
-	}
-
-	// 把审查结果合并回去
-	reviewMap := map[string]Result{}
-	for _, rv := range reviews {
-		reviewMap[rv.TaskID] = Result{
-			TaskID:   rv.TaskID,
-			Score:    rv.Score,
-			Approved: rv.Approved,
-			Feedback: rv.Feedback,
+	reviewMap := map[string]review{}
+	for _, line := range strings.Split(resp, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var rv review
+		if err := json.Unmarshal([]byte(line), &rv); err != nil {
+			continue
+		}
+		if rv.TaskID != "" {
+			reviewMap[rv.TaskID] = rv
 		}
 	}
+
+	if len(reviewMap) == 0 {
+		return results, fmt.Errorf("no valid review parsed, raw: %s", resp)
+	}
+
 	for i, res := range results {
 		if rv, ok := reviewMap[res.TaskID]; ok {
 			results[i].Score = rv.Score
