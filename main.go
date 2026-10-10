@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 func stringRepeat(s string, n int) string {
@@ -16,10 +17,12 @@ func main() {
 	task := flag.String("task", "", "要执行的复杂任务")
 	baseURL := flag.String("base", "https://api.deepseek.com/v1", "LLM API base URL")
 	model := flag.String("model", "deepseek-chat", "模型名")
+	stream := flag.Bool("stream", false, "流式输出")
+	maxRetries := flag.Int("retries", 2, "未通过任务最大重试次数")
 	flag.Parse()
 
 	if *task == "" {
-		fmt.Fprintln(os.Stderr, "用法: multi-agent --task \"你的复杂任务\"")
+		fmt.Fprintln(os.Stderr, "用法: multi-agent --task \"你的复杂任务\" [--stream] [--retries 2]")
 		os.Exit(1)
 	}
 
@@ -34,6 +37,7 @@ func main() {
 
 	cfg := &Config{BaseURL: *baseURL, APIKey: apiKey, Model: *model}
 	ctx := context.Background()
+	sep := stringRepeat("=", 60)
 
 	// 1. Planner 拆解任务
 	fmt.Println("🔍 [Planner] 正在拆解任务...")
@@ -45,17 +49,30 @@ func main() {
 	}
 	fmt.Printf("📋 拆解为 %d 个子任务：\n", len(tasks))
 	for _, t := range tasks {
-		fmt.Printf("   [%s] %s\n", t.ID, t.Title)
+		fmt.Printf("   [%s] %s → 角色: %s\n", t.ID, t.Title, t.AssignedTo)
 	}
 
 	// 2. Worker 并行执行
 	fmt.Println("\n⚡ [Worker] 并行执行中...")
-	workerPool := map[string]*WorkerAgent{
-		"general": NewWorker(cfg, "General-Worker", "通用执行"),
-	}
-	results := RunWorkers(ctx, cfg, tasks, workerPool)
-	for _, res := range results {
-		fmt.Printf("   ✅ [%s] %s (完成)\n", res.TaskID, res.Agent)
+	pool := DefaultWorkerPool(cfg)
+	var results []Result
+	if *stream {
+		// 流式模式：逐个 worker 流式输出（并行 goroutine 中流式会交错，简化为顺序）
+		for _, t := range tasks {
+			worker := selectWorker(pool, t)
+			content, err := worker.RunStream(ctx, t)
+			if err != nil {
+				content = fmt.Sprintf("ERROR: %v", err)
+			}
+			results = append(results, Result{
+				TaskID: t.ID, Agent: worker.Name(), Content: content, CreatedAt: time.Now(),
+			})
+		}
+	} else {
+		results = RunWorkers(ctx, cfg, tasks, pool, *maxRetries)
+		for _, res := range results {
+			fmt.Printf("   ✅ [%s] %s (完成)\n", res.TaskID, res.Agent)
+		}
 	}
 
 	// 3. Reviewer 审查
@@ -65,6 +82,22 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Reviewer warning: %v\n", err)
 	}
+
+	// 4. 重试未通过的任务
+	failedCount := 0
+	for _, res := range results {
+		if !res.Approved && res.Score < 7 {
+			failedCount++
+		}
+	}
+	if failedCount > 0 && *maxRetries > 0 {
+		fmt.Printf("\n🔄 有 %d 个任务未通过，开始重试...\n", failedCount)
+		results = RetryFailed(ctx, cfg, tasks, results, pool, *maxRetries)
+		// 重新审查
+		results, _ = reviewer.Run(ctx, results, tasks)
+	}
+
+	// 打印审查结果
 	approved, failed := 0, 0
 	for _, res := range results {
 		status := "✅"
@@ -77,7 +110,7 @@ func main() {
 		fmt.Printf("   %s [%s] score=%d feedback=%s\n", status, res.TaskID, res.Score, res.Feedback)
 	}
 
-	// 4. 汇总
+	// 5. 汇总
 	fmt.Println("\n📝 [Reviewer] 生成最终交付物...")
 	final, err := reviewer.Summarize(ctx, *task, results)
 	if err != nil {
@@ -85,7 +118,6 @@ func main() {
 		final = "汇总失败"
 	}
 
-	sep := stringRepeat("=", 60)
 	fmt.Println("\n" + sep)
 	fmt.Println("最终交付物：")
 	fmt.Println(sep)
