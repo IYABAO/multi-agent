@@ -21,6 +21,41 @@ func (r *ReviewerAgent) SystemPrompt() string {
 score 范围 1-10，>=7 为通过。不要输出其他内容。`
 }
 
+// parseReviewNDJSON 从 LLM 返回的 NDJSON 文本中解析评分结果
+func parseReviewNDJSON(resp string) map[string]reviewScore {
+	type review struct {
+		TaskID   string `json:"task_id"`
+		Score    int    `json:"score"`
+		Approved bool   `json:"approved"`
+		Feedback string `json:"feedback"`
+	}
+	reviewMap := map[string]reviewScore{}
+	for _, line := range strings.Split(resp, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var rv review
+		if err := json.Unmarshal([]byte(line), &rv); err != nil {
+			continue
+		}
+		if rv.TaskID != "" {
+			reviewMap[rv.TaskID] = reviewScore{
+				Score:    rv.Score,
+				Approved: rv.Approved,
+				Feedback: rv.Feedback,
+			}
+		}
+	}
+	return reviewMap
+}
+
+type reviewScore struct {
+	Score    int
+	Approved bool
+	Feedback string
+}
+
 func (r *ReviewerAgent) Run(ctx context.Context, results []Result, tasks []Task) ([]Result, error) {
 	taskMap := map[string]Task{}
 	for _, t := range tasks {
@@ -38,28 +73,7 @@ func (r *ReviewerAgent) Run(ctx context.Context, results []Result, tasks []Task)
 		return results, err
 	}
 
-	// 逐行解析 NDJSON（每行一个 JSON 对象）
-	type review struct {
-		TaskID   string `json:"task_id"`
-		Score    int    `json:"score"`
-		Approved bool   `json:"approved"`
-		Feedback string `json:"feedback"`
-	}
-	reviewMap := map[string]review{}
-	for _, line := range strings.Split(resp, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "{") {
-			continue
-		}
-		var rv review
-		if err := json.Unmarshal([]byte(line), &rv); err != nil {
-			continue
-		}
-		if rv.TaskID != "" {
-			reviewMap[rv.TaskID] = rv
-		}
-	}
-
+	reviewMap := parseReviewNDJSON(resp)
 	if len(reviewMap) == 0 {
 		return results, fmt.Errorf("no valid review parsed, raw: %s", resp)
 	}
