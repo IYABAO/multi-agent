@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -116,5 +120,88 @@ func TestParseReviewNDJSON_MultilineObjects(t *testing.T) {
 	}
 	if result["1"].Feedback != "质量高" {
 		t.Errorf("task1 feedback = %q", result["1"].Feedback)
+	}
+}
+
+func TestParsePlannerTasks(t *testing.T) {
+	tests := []struct {
+		name    string
+		resp    string
+		want    int
+		wantErr bool
+	}{
+		{
+			name: "纯 JSON 数组",
+			resp: `[{"id":"1","title":"梳理概念","assigned_to":"general"}]`,
+			want: 1,
+		},
+		{
+			name: "带 json 代码围栏",
+			resp: "```json\n[{\"id\":\"1\",\"title\":\"写代码\",\"assigned_to\":\"coder\"}]\n```",
+			want: 1,
+		},
+		{
+			name: "带前置说明",
+			resp: "好的，拆解如下：\n[{\"id\":\"1\",\"title\":\"审查\",\"assigned_to\":\"critic\"}]\n请执行。",
+			want: 1,
+		},
+		{
+			name:    "无 JSON",
+			resp:    "抱歉，我无法拆解这个任务。",
+			wantErr: true,
+		},
+		{
+			name:    "空数组",
+			resp:    `[]`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tasks, err := parsePlannerTasks(tt.resp)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %d tasks", len(tasks))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parsePlannerTasks error: %v", err)
+			}
+			if len(tasks) != tt.want {
+				t.Fatalf("got %d tasks, want %d", len(tasks), tt.want)
+			}
+		})
+	}
+}
+
+func TestPlannerRunAcceptsFencedJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("request path = %q, want /chat/completions", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{
+					"content": "```json\n[{\"id\":\"1\",\"title\":\"审查\",\"assigned_to\":\"critic\"}]\n```",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	p := &PlannerAgent{cfg: &Config{BaseURL: server.URL, APIKey: "test", Model: "test"}}
+	tasks, err := p.Run(context.Background(), "测试任务")
+	if err != nil {
+		t.Fatalf("PlannerAgent.Run error: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(tasks))
+	}
+	if tasks[0].AssignedTo != "critic" {
+		t.Errorf("assigned_to = %q, want critic", tasks[0].AssignedTo)
 	}
 }

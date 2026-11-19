@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // PlannerAgent 负责拆解任务
@@ -33,9 +34,27 @@ func (p *PlannerAgent) Run(ctx context.Context, task string) ([]Task, error) {
 		return nil, err
 	}
 
+	tasks, err := parsePlannerTasks(resp)
+	if err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+// parsePlannerTasks 从 LLM 返回文本中提取 JSON 数组。
+// 真实模型常会加 Markdown 代码围栏或前置说明，不能直接按纯 JSON 解析。
+func parsePlannerTasks(resp string) ([]Task, error) {
+	start := strings.Index(resp, "[")
+	if start == -1 {
+		return nil, fmt.Errorf("planner parse error: no JSON array in response: %s", resp)
+	}
+
 	var tasks []Task
-	if err := json.Unmarshal([]byte(resp), &tasks); err != nil {
+	if err := json.NewDecoder(strings.NewReader(resp[start:])).Decode(&tasks); err != nil {
 		return nil, fmt.Errorf("planner parse error: %w, raw: %s", err, resp)
+	}
+	if len(tasks) == 0 {
+		return nil, fmt.Errorf("planner returned no tasks, raw: %s", resp)
 	}
 	return tasks, nil
 }

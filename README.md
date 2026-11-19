@@ -106,6 +106,7 @@ go build -o multi-agent.exe .
 - **质量闭环**：Reviewer 输出 NDJSON 逐行评分（score 1-10, ≥7 通过），未通过任务自动重试；审查任务重试时同样注入上下文
 - **并发模型**：goroutine + WaitGroup，每个 Worker 独立 system prompt，职责单一
 - **流式输出**：SSE 逐 token 打印，支持 `--stream` 参数
+- **Planner 容错解析**：从模型返回文本中提取 JSON 数组，兼容 ```json 代码围栏和前置说明；空数组/无 JSON 会明确报错
 - **LLM 兼容**：OpenAI 兼容接口（DeepSeek / 任意 OpenAI-compatible API）
 
 ## 项目结构
